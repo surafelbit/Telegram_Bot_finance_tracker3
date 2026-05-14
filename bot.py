@@ -25,7 +25,12 @@ def save(data):
 def get_user(data, user_id):
     uid = str(user_id)
     if uid not in data:
-        data[uid] = {"name": None, "username": "", "partner_id": None, "transactions": [], "message_map": {}}
+        data[uid] = {"name": None, "username": "", "partner_id": None}
+    else:
+        # fill missing keys without overwriting existing data
+        data[uid].setdefault("name", None)
+        data[uid].setdefault("username", "")
+        data[uid].setdefault("partner_id", None)
     return data[uid]
 
 def balance_summary(data, user_id):
@@ -116,10 +121,23 @@ async def paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Amount must be a number. Example: /paid 500 lunch")
         return
+
     description = " ".join(context.args[1:]) if len(context.args) > 1 else "no description"
     now = time.time()
+    partner = get_user(data, user["partner_id"])
+
+    # if negative, flip payer to partner
+    if amount < 0:
+        amount = abs(amount)
+        actual_payer_id = user["partner_id"]
+        actual_payer_name = partner["name"] or "Your partner"
+    else:
+        actual_payer_id = uid
+        actual_payer_name = user["name"]
+
     if "transactions" not in data:
         data["transactions"] = []
+
     recent = [
         t for t in data["transactions"]
         if t["amount"] == amount and now - t["timestamp"] < 600
@@ -127,11 +145,11 @@ async def paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     if recent:
         r = recent[-1]
-        payer_name = user["name"] if r["payer"] == uid else get_user(data, user["partner_id"])["name"]
+        payer_name = user["name"] if r["payer"] == uid else partner["name"]
         dt = datetime.fromtimestamp(r["timestamp"]).strftime("%H:%M")
         if "pending" not in data:
             data["pending"] = {}
-        data["pending"][uid] = {"amount": amount, "description": description, "timestamp": now}
+        data["pending"][uid] = {"amount": amount, "description": description, "timestamp": now, "actual_payer_id": actual_payer_id}
         save(data)
         await update.message.reply_text(
             f"⚠️ Similar transaction recorded recently:\n"
@@ -139,25 +157,26 @@ async def paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Duplicate?\n✅ /confirm — save anyway\n❌ /cancel — don't save"
         )
         return
-    _save_transaction(data, uid, user, amount, description, now, update.message.message_id)
+
+    _save_transaction(data, actual_payer_id, amount, description, now, update.message.message_id)
     save(data)
     _, bal = balance_summary(data, uid)
     msg = (
-        f"✅ {user['name']} paid {amount:.0f} birr for {description}\n"
+        f"✅ {actual_payer_name} paid {amount:.0f} birr for {description}\n"
         f"🕐 {datetime.fromtimestamp(now).strftime('%H:%M')}\n"
         f"{bal}"
     )
     await update.message.reply_text(msg)
     await notify_partner(context, user["partner_id"], f"👀 New transaction!\n{msg}")
 
-def _save_transaction(data, uid, user, amount, description, timestamp, message_id):
+def _save_transaction(data, payer_id, amount, description, timestamp, message_id):
     if "transactions" not in data:
         data["transactions"] = []
     if "message_map" not in data:
         data["message_map"] = {}
     txn = {
         "id": len(data["transactions"]) + 1,
-        "payer": uid,
+        "payer": payer_id,
         "amount": amount,
         "description": description,
         "timestamp": timestamp,
@@ -174,8 +193,8 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not pending:
         await update.message.reply_text("No pending transaction to confirm.")
         return
-    user = get_user(data, uid)
-    _save_transaction(data, uid, user, pending["amount"], pending["description"], pending["timestamp"], update.message.message_id)
+    actual_payer_id = pending.get("actual_payer_id", uid)
+    _save_transaction(data, actual_payer_id, pending["amount"], pending["description"], pending["timestamp"], update.message.message_id)
     del data["pending"][uid]
     save(data)
     _, bal = balance_summary(data, uid)
@@ -256,12 +275,12 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             old_amount = t["amount"]
             old_desc = t["description"]
             t["edits"].append({"amount": old_amount, "description": old_desc, "edited_at": time.time()})
-            t["amount"] = new_amount
+            t["amount"] = abs(new_amount)
             if new_desc:
                 t["description"] = new_desc
             save(data)
             _, bal = balance_summary(data, uid)
-            msg = (f"✏️ Transaction #{txn_id} updated!\nWas: {old_amount:.0f} birr for {old_desc}\nNow: {new_amount:.0f} birr for {t['description']}\n{bal}")
+            msg = f"✏️ Transaction #{txn_id} updated!\nWas: {old_amount:.0f} birr for {old_desc}\nNow: {abs(new_amount):.0f} birr for {t['description']}\n{bal}"
             await update.message.reply_text(msg)
             await notify_partner(context, user["partner_id"], f"✏️ {user['name']} edited a transaction:\n{msg}")
             return
@@ -325,7 +344,7 @@ async def on_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not parts or parts[0].lower() != "/paid":
         return
     try:
-        new_amount = float(parts[1])
+        new_amount = abs(float(parts[1]))
     except (IndexError, ValueError):
         return
     new_desc = " ".join(parts[2:]) if len(parts) > 2 else None
@@ -339,7 +358,7 @@ async def on_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 t["description"] = new_desc
             save(data)
             _, bal = balance_summary(data, uid)
-            msg = (f"✏️ Updated via edit!\nWas: {old_amount:.0f} birr for {old_desc}\nNow: {new_amount:.0f} birr for {t['description']}\n{bal}")
+            msg = f"✏️ Updated via edit!\nWas: {old_amount:.0f} birr for {old_desc}\nNow: {new_amount:.0f} birr for {t['description']}\n{bal}"
             await update.edited_message.reply_text(msg)
             await notify_partner(context, user["partner_id"], f"✏️ {user['name']} edited a transaction:\n{msg}")
             return
@@ -350,6 +369,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start — Register yourself\n"
         "/link @username — Link with your partner\n"
         "/paid 500 lunch — Log a payment\n"
+        "/paid -500 lunch — Log payment by your partner\n"
         "/balance — See who owes who\n"
         "/history — See last 10 transactions\n"
         "/edit 3 450 dinner — Fix a transaction\n"
