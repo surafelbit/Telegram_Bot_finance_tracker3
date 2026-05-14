@@ -406,7 +406,12 @@ def main():
     t.daemon = True
     t.start()
 
-    app = ApplicationBuilder().token(token).build()
+    app = (
+    ApplicationBuilder()
+    .token(token)
+    .concurrent_updates(False)
+    .build()
+)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("link", link))
     app.add_handler(CommandHandler("paid", paid))
@@ -423,7 +428,7 @@ def main():
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, on_edit))
 
     print("🤖 Bot is running...")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
