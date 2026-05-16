@@ -27,7 +27,6 @@ def get_user(data, user_id):
     if uid not in data:
         data[uid] = {"name": None, "username": "", "partner_id": None}
     else:
-        # fill missing keys without overwriting existing data
         data[uid].setdefault("name", None)
         data[uid].setdefault("username", "")
         data[uid].setdefault("partner_id", None)
@@ -138,18 +137,21 @@ async def paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "transactions" not in data:
         data["transactions"] = []
 
+    # ── duplicate check: compare absolute values, last 3 recent transactions ──
+    recent_txns = data["transactions"][-3:] if len(data["transactions"]) >= 3 else data["transactions"]
     recent = [
-        t for t in data["transactions"]
-        if t["amount"] == amount and now - t["timestamp"] < 600
+        t for t in recent_txns
+        if abs(t["amount"] - amount) < 0.01
         and (t["payer"] == uid or t["payer"] == user["partner_id"])
     ]
+
     if recent:
         r = recent[-1]
         payer_name = user["name"] if r["payer"] == uid else partner["name"]
         dt = datetime.fromtimestamp(r["timestamp"]).strftime("%H:%M")
         if "pending" not in data:
             data["pending"] = {}
-        data["pending"][uid] = {"amount": amount, "description": description, "timestamp": now, "actual_payer_id": actual_payer_id}
+        data["pending"][uid] = {"amount": amount, "description": description, "timestamp": now, "actual_payer_id": actual_payer_id, "typer_id": uid}
         save(data)
         await update.message.reply_text(
             f"⚠️ Similar transaction recorded recently:\n"
@@ -158,7 +160,7 @@ async def paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    _save_transaction(data, actual_payer_id, amount, description, now, update.message.message_id)
+    _save_transaction(data, actual_payer_id, uid, amount, description, now, update.message.message_id)
     save(data)
     _, bal = balance_summary(data, uid)
     msg = (
@@ -169,7 +171,7 @@ async def paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
     await notify_partner(context, user["partner_id"], f"👀 New transaction!\n{msg}")
 
-def _save_transaction(data, payer_id, amount, description, timestamp, message_id):
+def _save_transaction(data, payer_id, typer_id, amount, description, timestamp, message_id):
     if "transactions" not in data:
         data["transactions"] = []
     if "message_map" not in data:
@@ -177,6 +179,7 @@ def _save_transaction(data, payer_id, amount, description, timestamp, message_id
     txn = {
         "id": len(data["transactions"]) + 1,
         "payer": payer_id,
+        "typer": typer_id,
         "amount": amount,
         "description": description,
         "timestamp": timestamp,
@@ -194,7 +197,7 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No pending transaction to confirm.")
         return
     actual_payer_id = pending.get("actual_payer_id", uid)
-    _save_transaction(data, actual_payer_id, pending["amount"], pending["description"], pending["timestamp"], update.message.message_id)
+    _save_transaction(data, actual_payer_id, pending.get("typer_id", uid), pending["amount"], pending["description"], pending["timestamp"], update.message.message_id)
     del data["pending"][uid]
     save(data)
     _, bal = balance_summary(data, uid)
@@ -269,7 +272,7 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_desc = " ".join(context.args[2:]) if len(context.args) > 2 else None
     for t in data.get("transactions", []):
         if t["id"] == txn_id:
-            if t["payer"] != uid:
+            if t.get("typer", t["payer"]) != uid:
                 await update.message.reply_text("❌ You can only edit your own transactions.")
                 return
             old_amount = t["amount"]
@@ -407,11 +410,11 @@ def main():
     t.start()
 
     app = (
-    ApplicationBuilder()
-    .token(token)
-    .concurrent_updates(False)
-    .build()
-)
+        ApplicationBuilder()
+        .token(token)
+        .concurrent_updates(False)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("link", link))
     app.add_handler(CommandHandler("paid", paid))
